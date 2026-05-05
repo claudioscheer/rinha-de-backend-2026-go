@@ -11,6 +11,11 @@ services:
       GOGC: "50"
       GOMEMLIMIT: "80MiB"
       GOMAXPROCS: "1"
+    # Top-level cpus / mem_limit are honored by `docker compose up` without
+    # swarm; the deploy block keeps the same caps for tooling that reads it
+    # (contest runner, swarm).
+    cpus: 0.40
+    mem_limit: 160m
     deploy:
       resources:
         limits:
@@ -31,6 +36,8 @@ services:
       - api2
     networks:
       - rinha
+    cpus: 0.20
+    mem_limit: 30m
     deploy:
       resources:
         limits:
