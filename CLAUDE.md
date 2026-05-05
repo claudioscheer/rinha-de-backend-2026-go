@@ -1,9 +1,13 @@
-# CLAUDE.md
+# Agent memory
 
-Project memory for Claude Code working on this Rinha de Backend 2026 entry.
+Project memory for the coding agents working on this Rinha de Backend 2026
+entry. Both **Claude Code** and **Codex** read this file (Codex via the
+`AGENTS.md` symlink that points here) so the working agreements stay the
+same regardless of which agent is driving.
+
 This is an **AI-only experiment**: every line of code, test, and config in
-this repo is produced by Claude Code under human direction (see the README).
-Keep it that way.
+this repo is produced by Claude Code or Codex under human direction (see
+the README). Keep it that way.
 
 ## What this project is
 
@@ -78,10 +82,11 @@ These come from the contest config (`config.json`, `docker-compose.yml`):
 - **No new dependencies** unless necessary. Standard library only is the
   current state and has been enough.
 - **Commits use `claudioscheer <claudioscheer@protonmail.com>`** (set in
-  `.git/config`). **Never add `Co-Authored-By: Claude` or any other Claude
-  attribution to commit messages.** Never include `https://claude.ai/...`
-  links. The AI-only nature of the project is documented in the README; it
-  does not need to bleed into the commit log.
+  `.git/config`). **Never add agent attribution to commit messages** —
+  no `Co-Authored-By: Claude`, no `Co-Authored-By: Codex`, no
+  `https://claude.ai/...` or `https://chat.openai.com/...` links. The
+  AI-only nature of the project is documented in the README; it does not
+  need to bleed into the commit log.
 - **PRs are the human's call.** Open as draft when asked; don't merge
   without explicit permission.
 - **Don't edit `participants/*.json`** — those belong to the upstream
