@@ -14,6 +14,10 @@ A **Rinha de Backend** é uma competição amistosa em que você constrói um ba
 
 **Documentação completa do desafio:** [**docs/br/README.md**](./docs/br/README.md)
 
+> ### Experimento: até onde dá pra ir só com IA?
+>
+> Esta minha submissão é um experimento pessoal: **quero ver até onde consigo chegar usando apenas soluções geradas por IA**, sem escrever código manualmente. Cada commit, teste e configuração deste repositório é produzido pelo Claude Code sob minha orientação. Os atalhos, abstrações e otimizações que eu normalmente aplicaria ficam em segundo plano — o objetivo é descobrir os limites práticos do desenvolvimento assistido por IA dentro das restrições da Rinha.
+
 ### Edições anteriores
 
 - [**2025** — Payment Processor](https://github.com/zanfranceschi/rinha-de-backend-2025)
@@ -34,6 +38,10 @@ A **Rinha de Backend** é uma competição amistosa em que você constrói um ba
 **Rinha de Backend** is a friendly competition where you build a backend under CPU, memory, and architecture constraints. Each edition has a different theme – this one is **fraud detection using vector search**.
 
 **Full challenge documentation:** [**docs/en/README.md**](./docs/en/README.md)
+
+> ### Experiment: how far can I get with AI-only solutions?
+>
+> This entry is a personal experiment: **I want to see how far I can get using only AI-generated solutions**, without writing code by hand. Every commit, test, and config in this repository is produced by Claude Code under my direction. The shortcuts, abstractions, and optimizations I would normally reach for are off the table — the point is to find the practical limits of AI-assisted development inside the Rinha's constraints.
 
 ### Previous editions
 
