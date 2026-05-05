@@ -101,6 +101,7 @@ else
     echo "  k6 not installed locally; using grafana/k6:latest in docker"
     docker run --rm -i \
         --network=host \
+        --user "$(id -u):$(id -g)" \
         -e K6_NO_USAGE_REPORT=true \
         -v "$(pwd):/work" \
         -w /work \
