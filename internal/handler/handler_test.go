@@ -11,31 +11,30 @@ import (
 	"github.com/claudioscheer/rinha-de-backend-2026-go/internal/dataset"
 )
 
-// minimal dataset that produces a deterministic answer regardless of input:
-// every reference is fraud, so the score is always 1.0 / approved=false.
-func allFraudDataset() *dataset.Dataset {
-	flat := make([]float32, 5*dataset.VectorDim)
-	return &dataset.Dataset{
-		Norm: dataset.Normalization{
-			MaxAmount:            10000,
-			MaxInstallments:      12,
-			AmountVsAvgRatio:     10,
-			MaxMinutes:           1440,
-			MaxKm:                1000,
-			MaxTxCount24h:        20,
-			MaxMerchantAvgAmount: 10000,
-		},
-		MccRisk: map[string]float32{},
-		Vectors: flat,
-		Frauds:  []bool{true, true, true, true, true},
+// makeDataset builds a 5-record dataset where every reference is the zero
+// vector. Setting fraud=true makes the score 1.0; fraud=false makes it 0.0.
+func makeDataset(allFraud bool) *dataset.Dataset {
+	flat := make([]uint8, 5*dataset.VectorDim)
+	frauds := make([]uint8, 1)
+	if allFraud {
+		frauds[0] = 0b00011111 // 5 frauds
 	}
-}
-
-func allLegitDataset() *dataset.Dataset {
-	ds := allFraudDataset()
-	ds.Frauds = []bool{false, false, false, false, false}
+	ds := dataset.NewForTest(flat, frauds, 5)
+	ds.Norm = dataset.Normalization{
+		MaxAmount:            10000,
+		MaxInstallments:      12,
+		AmountVsAvgRatio:     10,
+		MaxMinutes:           1440,
+		MaxKm:                1000,
+		MaxTxCount24h:        20,
+		MaxMerchantAvgAmount: 10000,
+	}
+	ds.MccRisk = map[string]float32{}
 	return ds
 }
+
+func allFraudDataset() *dataset.Dataset { return makeDataset(true) }
+func allLegitDataset() *dataset.Dataset { return makeDataset(false) }
 
 func TestReady(t *testing.T) {
 	h := New(allFraudDataset())

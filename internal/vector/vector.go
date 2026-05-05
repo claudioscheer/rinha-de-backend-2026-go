@@ -11,8 +11,10 @@ type LastTransaction struct {
 	KmFromCurrent float64   `json:"km_from_current"`
 }
 
+// Payload mirrors only the fields actually consumed by Vectorize. Anything
+// else in the request body (e.g. `id`) is skipped by the JSON decoder, which
+// avoids allocating strings we'd never read.
 type Payload struct {
-	ID          string `json:"id"`
 	Transaction struct {
 		Amount       float64   `json:"amount"`
 		Installments int       `json:"installments"`
@@ -36,58 +38,61 @@ type Payload struct {
 	LastTransaction *LastTransaction `json:"last_transaction"`
 }
 
-func clamp(v float64) float64 {
-	if v < 0 {
-		return 0
-	}
-	if v > 1 {
-		return 1
-	}
-	return v
+// Reset clears the payload while keeping the KnownMerchants backing array, so
+// a sync.Pool'd Payload can be re-decoded without re-allocating the slice
+// header.
+func (p *Payload) Reset() {
+	merchants := p.Customer.KnownMerchants[:0]
+	*p = Payload{}
+	p.Customer.KnownMerchants = merchants
 }
 
-// Vectorize turns the payload into a 14-dimensional vector following
-// docs/en/DETECTION_RULES.md.
-func Vectorize(p *Payload, ds *dataset.Dataset) [dataset.VectorDim]float32 {
-	n := ds.Norm
-	var v [dataset.VectorDim]float32
+func clamp01(v float64) float64 { return min(1, max(0, v)) }
 
-	v[0] = float32(clamp(p.Transaction.Amount / n.MaxAmount))
-	v[1] = float32(clamp(float64(p.Transaction.Installments) / n.MaxInstallments))
+// Vectorize turns the payload into a 14-dimensional uint8 vector following
+// docs/en/DETECTION_RULES.md.
+func Vectorize(p *Payload, ds *dataset.Dataset) [dataset.VectorDim]uint8 {
+	n := ds.Norm
+	var v [dataset.VectorDim]uint8
+
+	v[0] = dataset.Quantize(float32(clamp01(p.Transaction.Amount / n.MaxAmount)))
+	v[1] = dataset.Quantize(float32(clamp01(float64(p.Transaction.Installments) / n.MaxInstallments)))
 
 	if p.Customer.AvgAmount > 0 {
-		v[2] = float32(clamp((p.Transaction.Amount / p.Customer.AvgAmount) / n.AmountVsAvgRatio))
+		v[2] = dataset.Quantize(float32(clamp01((p.Transaction.Amount / p.Customer.AvgAmount) / n.AmountVsAvgRatio)))
 	} else {
-		v[2] = 1
+		v[2] = dataset.Quantize(1)
 	}
 
 	t := p.Transaction.RequestedAt.UTC()
-	v[3] = float32(float64(t.Hour()) / 23.0)
+	v[3] = dataset.Quantize(float32(float64(t.Hour()) / 23.0))
 	// Go: Sunday=0..Saturday=6. Spec: Mon=0..Sun=6.
-	wd := int(t.Weekday())
-	monBased := (wd + 6) % 7
-	v[4] = float32(float64(monBased) / 6.0)
+	v[4] = dataset.Quantize(float32(float64((int(t.Weekday())+6)%7) / 6.0))
 
 	if p.LastTransaction != nil {
 		minutes := p.Transaction.RequestedAt.Sub(p.LastTransaction.Timestamp).Minutes()
 		if minutes < 0 {
 			minutes = 0
 		}
-		v[5] = float32(clamp(minutes / n.MaxMinutes))
-		v[6] = float32(clamp(p.LastTransaction.KmFromCurrent / n.MaxKm))
+		v[5] = dataset.Quantize(float32(clamp01(minutes / n.MaxMinutes)))
+		v[6] = dataset.Quantize(float32(clamp01(p.LastTransaction.KmFromCurrent / n.MaxKm)))
 	} else {
-		v[5] = -1
-		v[6] = -1
+		v[5] = dataset.Quantize(-1)
+		v[6] = dataset.Quantize(-1)
 	}
 
-	v[7] = float32(clamp(p.Terminal.KmFromHome / n.MaxKm))
-	v[8] = float32(clamp(float64(p.Customer.TxCount24h) / n.MaxTxCount24h))
+	v[7] = dataset.Quantize(float32(clamp01(p.Terminal.KmFromHome / n.MaxKm)))
+	v[8] = dataset.Quantize(float32(clamp01(float64(p.Customer.TxCount24h) / n.MaxTxCount24h)))
 
 	if p.Terminal.IsOnline {
-		v[9] = 1
+		v[9] = dataset.Quantize(1)
+	} else {
+		v[9] = dataset.Quantize(0)
 	}
 	if p.Terminal.CardPresent {
-		v[10] = 1
+		v[10] = dataset.Quantize(1)
+	} else {
+		v[10] = dataset.Quantize(0)
 	}
 
 	known := false
@@ -97,17 +102,19 @@ func Vectorize(p *Payload, ds *dataset.Dataset) [dataset.VectorDim]float32 {
 			break
 		}
 	}
-	if !known {
-		v[11] = 1
+	if known {
+		v[11] = dataset.Quantize(0)
+	} else {
+		v[11] = dataset.Quantize(1)
 	}
 
 	if r, ok := ds.MccRisk[p.Merchant.MCC]; ok {
-		v[12] = r
+		v[12] = dataset.Quantize(r)
 	} else {
-		v[12] = 0.5
+		v[12] = dataset.Quantize(0.5)
 	}
 
-	v[13] = float32(clamp(p.Merchant.AvgAmount / n.MaxMerchantAvgAmount))
+	v[13] = dataset.Quantize(float32(clamp01(p.Merchant.AvgAmount / n.MaxMerchantAvgAmount)))
 
 	return v
 }
