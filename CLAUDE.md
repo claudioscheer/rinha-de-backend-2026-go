@@ -89,9 +89,20 @@ These come from the contest config (`config.json`, `docker-compose.yml`):
   -out resources/references.bin`.
 - **No new dependencies** unless necessary. Standard library only is the
   current state and has been enough.
-- **Commits use `claudioscheer <claudioscheer@protonmail.com>`** (set in
-  `.git/config`). **Never add agent attribution to commit messages** —
-  no `Co-Authored-By: Claude`, no `Co-Authored-By: Codex`, no
+- **Commits use `claudioscheer <claudioscheer@protonmail.com>` for both
+  author and committer.** When the agent's local `git config user.*`
+  resolves to anything else (e.g. `Claude <noreply@anthropic.com>` or
+  `Codex <noreply@openai.com>`), pass the identity inline rather than
+  modifying `.git/config`:
+  ```
+  GIT_COMMITTER_NAME="claudioscheer" \
+  GIT_COMMITTER_EMAIL="claudioscheer@protonmail.com" \
+  git commit --author "claudioscheer <claudioscheer@protonmail.com>" -m ...
+  ```
+  Verify after committing with `git log -1 --pretty='%an <%ae> | %cn <%ce>'`
+  — both fields must read `claudioscheer <claudioscheer@protonmail.com>`.
+- **Never add agent attribution to commit messages** — no
+  `Co-Authored-By: Claude`, no `Co-Authored-By: Codex`, no
   `https://claude.ai/...` or `https://chat.openai.com/...` links. The
   AI-only nature of the project is documented in the README; it does not
   need to bleed into the commit log.
