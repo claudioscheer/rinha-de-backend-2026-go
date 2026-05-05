@@ -4,6 +4,13 @@ services:
     image: rinha-2026-go-api:latest
     networks:
       - rinha
+    # Per-replica budget. The reference dataset is shipped as a 42 MB
+    # mmap'd blob (uint8-quantized + packed fraud bitmap), so the Go heap
+    # itself stays small and we bound it via GOMEMLIMIT below.
+    environment:
+      GOGC: "50"
+      GOMEMLIMIT: "80MiB"
+      GOMAXPROCS: "1"
     deploy:
       resources:
         limits:
