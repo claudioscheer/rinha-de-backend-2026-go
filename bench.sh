@@ -96,15 +96,15 @@ fi
 echo "==> running k6 (test ramps to 900 RPS over ~120s; total ~140s)"
 export K6_NO_USAGE_REPORT=true
 if command -v k6 >/dev/null; then
-    k6 run --quiet test/test.js
+    k6 run test/test.js
 else
     echo "  k6 not installed locally; using grafana/k6:latest in docker"
     docker run --rm -i \
         --network=host \
         -e K6_NO_USAGE_REPORT=true \
-        -v "$(pwd)/test:/test" \
-        -w /test \
-        grafana/k6:latest run --quiet test.js
+        -v "$(pwd):/work" \
+        -w /work \
+        grafana/k6:latest run test/test.js
 fi
 
 echo "==> post-test container snapshot"
