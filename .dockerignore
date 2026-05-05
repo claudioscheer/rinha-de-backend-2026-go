@@ -1,0 +1,15 @@
+.git
+.github
+.claude
+docs
+misc
+participants
+data-generator
+test
+README.md
+*.md
+post-run.sh
+run.sh
+estimated-requests.sh
+generate-data.sh
+shell.nix
