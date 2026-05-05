@@ -128,9 +128,9 @@ FAIL=$(jq -r '.scoring.failure_rate' test/results.json)
 cat <<EOF
 
 =========================================================
-  final_score:     $FINAL  (max 6000)
-    detection:     $DET  (max 3000)
-    p99 latency:   $P99S  (max 3000) — observed p99 = $P99
+  final_score:     $FINAL
+    detection:     $DET
+    p99 latency:   $P99S  (observed p99 = $P99)
   failure rate:    $FAIL
 =========================================================
 EOF
