@@ -51,7 +51,7 @@ func (h *Handler) FraudScore(w http.ResponseWriter, r *http.Request) {
 	bp := bufPool.Get().(*[]byte)
 	buf := (*bp)[:0]
 	buf = append(buf, `{"approved":`...)
-	if score < 0.6 {
+	if score < 0.4 {
 		buf = append(buf, "true"...)
 	} else {
 		buf = append(buf, "false"...)

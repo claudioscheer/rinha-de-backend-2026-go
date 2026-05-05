@@ -162,13 +162,13 @@ func TestEndToEnd_HighRiskDenied(t *testing.T) {
 	}
 }
 
-// Threshold boundary: 0.6 must be the *exclusive* upper bound for approval.
-// 3 frauds out of 5 → 0.6 → approved=false.
+// Threshold boundary: 0.4 must be the *exclusive* upper bound for approval.
+// 2 frauds out of 5 → 0.4 → approved=false.
 func TestEndToEnd_ThresholdExact(t *testing.T) {
 	dir := writeFixture(t, `[
       {"vector":[0,0,0,0,0,0,0,0,0,0,0,0,0,0],"label":"fraud"},
       {"vector":[0,0,0,0,0,0,0,0,0,0,0,0,0,0],"label":"fraud"},
-      {"vector":[0,0,0,0,0,0,0,0,0,0,0,0,0,0],"label":"fraud"},
+      {"vector":[0,0,0,0,0,0,0,0,0,0,0,0,0,0],"label":"legit"},
       {"vector":[0,0,0,0,0,0,0,0,0,0,0,0,0,0],"label":"legit"},
       {"vector":[0,0,0,0,0,0,0,0,0,0,0,0,0,0],"label":"legit"}
     ]`)
@@ -202,10 +202,10 @@ func TestEndToEnd_ThresholdExact(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if out.FraudScore != 0.6 {
-		t.Fatalf("score = %v, want 0.6", out.FraudScore)
+	if out.FraudScore != 0.4 {
+		t.Fatalf("score = %v, want 0.4", out.FraudScore)
 	}
 	if out.Approved {
-		t.Errorf("approved = true at score 0.6, but threshold is exclusive (< 0.6)")
+		t.Errorf("approved = true at score 0.4, but threshold is exclusive (< 0.4)")
 	}
 }
