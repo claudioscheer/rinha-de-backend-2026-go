@@ -17,10 +17,11 @@ const VectorDim = 14
 
 // binaryMagic identifies the pre-compiled references.bin format produced by
 // cmd/compile-dataset. Bumping this invalidates older blobs.
-const binaryMagic uint32 = 0x52313236 // "R126"
+const binaryMagic uint32 = 0x52313237 // "R127"
 
-// binaryHeaderSize is the on-disk header preceding the vector + fraud blocks.
-const binaryHeaderSize = 8
+// binaryHeaderSize is the on-disk header preceding the index + vector + fraud
+// blocks: magic, count, num_clusters, reserved (each 4 bytes).
+const binaryHeaderSize = 16
 
 type Normalization struct {
 	MaxAmount            float64 `json:"max_amount"`
@@ -39,18 +40,37 @@ type Normalization struct {
 // of the data is kept in Vectors, which can be mmap-backed when loaded from a
 // pre-compiled blob — that lets two API replicas share the same physical
 // pages via the kernel's page cache.
+//
+// When NumClusters > 0, the dataset carries an inverted-file (IVF) index:
+// vectors are sorted by cluster id, ClusterOffsets[c..c+1] gives the slice of
+// records assigned to cluster c, and Centroids holds one quantized centroid
+// per cluster. Search ranks centroids and only scans the closest few buckets.
 type Dataset struct {
 	Norm    Normalization
 	MccRisk map[string]float32
 
 	// Vectors stores quantized vectors flattened: index i lives at
-	// Vectors[i*VectorDim : (i+1)*VectorDim].
+	// Vectors[i*VectorDim : (i+1)*VectorDim]. With an IVF index, vectors
+	// are stored in cluster-id order.
 	Vectors []uint8
-	// Frauds is a packed bitmap. Bit i is 1 when record i is fraud.
+	// Frauds is a packed bitmap. Bit i is 1 when record i is fraud. The
+	// ordering matches Vectors.
 	Frauds []uint8
-	count  int
 
-	// mmap is non-nil when Vectors/Frauds slice into an mmap'd region.
+	// Centroids holds quantized cluster centroids:
+	// Centroids[c*VectorDim : (c+1)*VectorDim]. Nil when NumClusters == 0.
+	Centroids []uint8
+	// ClusterOffsets has length NumClusters+1. Records of cluster c live
+	// at indices [ClusterOffsets[c], ClusterOffsets[c+1]). Heap-allocated
+	// so the hot path doesn't decode uint32s out of the mmap on every
+	// query.
+	ClusterOffsets []uint32
+	NumClusters    int
+
+	count int
+
+	// mmap is non-nil when Vectors/Frauds/Centroids slice into an mmap'd
+	// region.
 	mmap []byte
 }
 
@@ -68,12 +88,28 @@ func (d *Dataset) Vector(i int) []uint8 {
 }
 
 // NewForTest constructs a heap-only Dataset around caller-supplied buffers.
-// Intended only for unit tests that need a controlled fixture.
+// Intended only for unit tests that need a controlled fixture. The returned
+// dataset has no IVF index (NumClusters == 0), so search falls back to brute
+// force.
 func NewForTest(vectors, frauds []uint8, count int) *Dataset {
 	return &Dataset{
 		Vectors: vectors,
 		Frauds:  frauds,
 		count:   count,
+	}
+}
+
+// NewForTestIVF constructs a heap-only Dataset with an IVF index. The caller
+// must guarantee vectors and frauds are already in cluster-id order, with
+// offsets[c..c+1] delimiting cluster c and offsets[numClusters] == count.
+func NewForTestIVF(vectors, frauds, centroids []uint8, offsets []uint32, count, numClusters int) *Dataset {
+	return &Dataset{
+		Vectors:        vectors,
+		Frauds:         frauds,
+		Centroids:      centroids,
+		ClusterOffsets: offsets,
+		NumClusters:    numClusters,
+		count:          count,
 	}
 }
 
@@ -113,15 +149,10 @@ func Load(dir string) (*Dataset, error) {
 	}
 
 	binPath := filepath.Join(dir, "references.bin")
-	if vectors, frauds, count, mmapBuf, err := loadBinary(binPath); err == nil {
-		return &Dataset{
-			Norm:    norm,
-			MccRisk: mccRisk,
-			Vectors: vectors,
-			Frauds:  frauds,
-			count:   count,
-			mmap:    mmapBuf,
-		}, nil
+	if ds, err := loadBinary(binPath); err == nil {
+		ds.Norm = norm
+		ds.MccRisk = mccRisk
+		return ds, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("load binary references: %w", err)
 	}
@@ -202,48 +233,99 @@ func (g gzipReadCloser) Close() error {
 	return fErr
 }
 
-// loadBinary mmaps the pre-compiled references.bin. The slices it returns
-// alias the mmap region; the caller must keep mmapBuf alive for their
-// lifetime and Munmap it at shutdown.
-func loadBinary(path string) ([]uint8, []uint8, int, []byte, error) {
+// loadBinary mmaps the pre-compiled references.bin and returns a Dataset
+// whose Vectors/Frauds/Centroids slices alias the mmap region. The caller
+// must Close the dataset at shutdown to release the mapping.
+//
+// Layout:
+//
+//	header[16]                                            magic | count | nc | reserved
+//	if nc > 0:
+//	  centroids[nc*VectorDim]                             quantized centroids
+//	  cluster_offsets[(nc+1)*4]                           uint32 LE prefix sums
+//	vectors[count*VectorDim]                              uint8 vectors (cluster-sorted when nc>0)
+//	frauds[(count+7)/8]                                   packed fraud bitmap
+func loadBinary(path string) (*Dataset, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, nil, 0, nil, err
+		return nil, err
 	}
 	defer f.Close()
 
 	st, err := f.Stat()
 	if err != nil {
-		return nil, nil, 0, nil, fmt.Errorf("stat: %w", err)
+		return nil, fmt.Errorf("stat: %w", err)
 	}
 	size := int(st.Size())
 	if size < binaryHeaderSize {
-		return nil, nil, 0, nil, fmt.Errorf("references.bin too small: %d bytes", size)
+		return nil, fmt.Errorf("references.bin too small: %d bytes", size)
 	}
 
 	buf, err := syscall.Mmap(int(f.Fd()), 0, size, syscall.PROT_READ, syscall.MAP_SHARED)
 	if err != nil {
-		return nil, nil, 0, nil, fmt.Errorf("mmap: %w", err)
+		return nil, fmt.Errorf("mmap: %w", err)
 	}
 
 	magic := binary.LittleEndian.Uint32(buf[0:4])
 	if magic != binaryMagic {
 		_ = syscall.Munmap(buf)
-		return nil, nil, 0, nil, fmt.Errorf("bad magic 0x%08x, want 0x%08x", magic, binaryMagic)
+		return nil, fmt.Errorf("bad magic 0x%08x, want 0x%08x", magic, binaryMagic)
 	}
 	count := int(binary.LittleEndian.Uint32(buf[4:8]))
+	nc := int(binary.LittleEndian.Uint32(buf[8:12]))
 
-	vecBytes := count * VectorDim
-	fb := fraudBytes(count)
-	expected := binaryHeaderSize + vecBytes + fb
-	if size < expected {
-		_ = syscall.Munmap(buf)
-		return nil, nil, 0, nil, fmt.Errorf("truncated references.bin: have %d bytes, need %d", size, expected)
+	pos := binaryHeaderSize
+	var centroids []uint8
+	var offsets []uint32
+	if nc > 0 {
+		centBytes := nc * VectorDim
+		if pos+centBytes > size {
+			_ = syscall.Munmap(buf)
+			return nil, fmt.Errorf("truncated centroids: %d bytes available, %d needed", size-pos, centBytes)
+		}
+		centroids = buf[pos : pos+centBytes]
+		pos += centBytes
+
+		offsetsBytes := (nc + 1) * 4
+		if pos+offsetsBytes > size {
+			_ = syscall.Munmap(buf)
+			return nil, fmt.Errorf("truncated cluster offsets")
+		}
+		offsets = make([]uint32, nc+1)
+		for i := 0; i <= nc; i++ {
+			offsets[i] = binary.LittleEndian.Uint32(buf[pos+i*4:])
+		}
+		if int(offsets[nc]) != count {
+			_ = syscall.Munmap(buf)
+			return nil, fmt.Errorf("cluster offsets[%d]=%d does not match count=%d", nc, offsets[nc], count)
+		}
+		pos += offsetsBytes
 	}
 
-	vectors := buf[binaryHeaderSize : binaryHeaderSize+vecBytes]
-	frauds := buf[binaryHeaderSize+vecBytes : binaryHeaderSize+vecBytes+fb]
-	return vectors, frauds, count, buf, nil
+	vecBytes := count * VectorDim
+	if pos+vecBytes > size {
+		_ = syscall.Munmap(buf)
+		return nil, fmt.Errorf("truncated vectors: %d bytes available, %d needed", size-pos, vecBytes)
+	}
+	vectors := buf[pos : pos+vecBytes]
+	pos += vecBytes
+
+	fb := fraudBytes(count)
+	if pos+fb > size {
+		_ = syscall.Munmap(buf)
+		return nil, fmt.Errorf("truncated frauds: %d bytes available, %d needed", size-pos, fb)
+	}
+	frauds := buf[pos : pos+fb]
+
+	return &Dataset{
+		Vectors:        vectors,
+		Frauds:         frauds,
+		Centroids:      centroids,
+		ClusterOffsets: offsets,
+		NumClusters:    nc,
+		count:          count,
+		mmap:           buf,
+	}, nil
 }
 
 // loadJSON streams a gzipped JSON array of `{"vector": [...], "label": "..."}`
@@ -305,22 +387,48 @@ type referenceRecord struct {
 	Label  string    `json:"label"`
 }
 
-// WriteBinary serializes vectors + frauds bitmap into the on-disk format
-// consumed by loadBinary. Used by cmd/compile-dataset.
-func WriteBinary(w io.Writer, vectors, frauds []uint8, count int) error {
+// writeBlob serializes a (possibly IVF-indexed) reference blob into the
+// on-disk format consumed by loadBinary. centroids/offsets must be set
+// consistently with numClusters: nil and zero for a flat layout, populated
+// otherwise.
+func writeBlob(w io.Writer, vectors, frauds, centroids []uint8, offsets []uint32, count, numClusters int) error {
 	if len(vectors) != count*VectorDim {
 		return fmt.Errorf("vectors length %d, want %d", len(vectors), count*VectorDim)
 	}
 	if len(frauds) != fraudBytes(count) {
 		return fmt.Errorf("frauds length %d, want %d", len(frauds), fraudBytes(count))
 	}
+	if numClusters > 0 {
+		if len(centroids) != numClusters*VectorDim {
+			return fmt.Errorf("centroids length %d, want %d", len(centroids), numClusters*VectorDim)
+		}
+		if len(offsets) != numClusters+1 {
+			return fmt.Errorf("offsets length %d, want %d", len(offsets), numClusters+1)
+		}
+		if int(offsets[numClusters]) != count {
+			return fmt.Errorf("offsets[%d]=%d, want count=%d", numClusters, offsets[numClusters], count)
+		}
+	}
 
 	bw := bufio.NewWriterSize(w, 1<<20)
 	var hdr [binaryHeaderSize]byte
 	binary.LittleEndian.PutUint32(hdr[0:4], binaryMagic)
 	binary.LittleEndian.PutUint32(hdr[4:8], uint32(count))
+	binary.LittleEndian.PutUint32(hdr[8:12], uint32(numClusters))
 	if _, err := bw.Write(hdr[:]); err != nil {
 		return err
+	}
+	if numClusters > 0 {
+		if _, err := bw.Write(centroids); err != nil {
+			return err
+		}
+		var off [4]byte
+		for i := 0; i <= numClusters; i++ {
+			binary.LittleEndian.PutUint32(off[:], offsets[i])
+			if _, err := bw.Write(off[:]); err != nil {
+				return err
+			}
+		}
 	}
 	if _, err := bw.Write(vectors); err != nil {
 		return err
@@ -331,8 +439,10 @@ func WriteBinary(w io.Writer, vectors, frauds []uint8, count int) error {
 	return bw.Flush()
 }
 
-// CompileFromJSONGz reads a gzipped references file and writes the compact
-// binary form. Exported for use by cmd/compile-dataset.
+// CompileFromJSONGz reads a gzipped references file, builds an IVF index
+// (when the dataset is large enough), reorders vectors by cluster id, and
+// writes the compact binary blob the API mmaps at startup. Exported for use
+// by cmd/compile-dataset.
 func CompileFromJSONGz(in, out string) error {
 	r, err := openGzipped(in)
 	if err != nil {
@@ -345,12 +455,21 @@ func CompileFromJSONGz(in, out string) error {
 		return err
 	}
 
+	numClusters := chooseNumClusters(count)
+	var centroids []uint8
+	var offsets []uint32
+	if numClusters > 0 {
+		var assignments []uint16
+		centroids, assignments = kmeans(vectors, count, numClusters)
+		vectors, frauds, offsets = reorderByCluster(vectors, frauds, count, numClusters, assignments)
+	}
+
 	tmp := out + ".tmp"
 	o, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
-	if err := WriteBinary(o, vectors, frauds, count); err != nil {
+	if err := writeBlob(o, vectors, frauds, centroids, offsets, count, numClusters); err != nil {
 		_ = o.Close()
 		_ = os.Remove(tmp)
 		return err

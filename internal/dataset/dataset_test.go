@@ -3,6 +3,8 @@ package dataset
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"testing"
@@ -177,6 +179,95 @@ func TestQuantize(t *testing.T) {
 		if got := Quantize(c.in); got != c.want {
 			t.Errorf("Quantize(%v) = %d, want %d", c.in, got, c.want)
 		}
+	}
+}
+
+// TestCompile_IVFRoundTrip drives the full pipeline (decode JSON → k-means →
+// bucket-sort → writeBlob → loadBinary) on a synthetic dataset large enough
+// to trigger the IVF code path. It validates that:
+//   - the loaded dataset reports a positive NumClusters,
+//   - cluster offsets form a valid prefix sum that ends at count,
+//   - every record stays present after reordering (each cluster non-empty
+//     check skipped — k-means may legitimately empty some).
+func TestCompile_IVFRoundTrip(t *testing.T) {
+	const n = 2048
+
+	// Two well-separated populations so k-means converges fast: half near
+	// 0.0 (legit), half near 1.0 (fraud), with small Gaussian noise.
+	rng := rand.New(rand.NewPCG(42, 99))
+	recs := make([]referenceRecord, n)
+	for i := 0; i < n; i++ {
+		recs[i].Vector = make([]float32, VectorDim)
+		center := float32(0.0)
+		label := "legit"
+		if i%2 == 0 {
+			center = 1.0
+			label = "fraud"
+		}
+		for d := 0; d < VectorDim; d++ {
+			recs[i].Vector[d] = center + float32(rng.NormFloat64())*0.05
+		}
+		recs[i].Label = label
+	}
+	data, err := json.Marshal(recs)
+	if err != nil {
+		t.Fatalf("marshal refs: %v", err)
+	}
+
+	dir := writeFixtureDir(t, string(data))
+	if err := CompileFromJSONGz(
+		filepath.Join(dir, "references.json.gz"),
+		filepath.Join(dir, "references.bin"),
+	); err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "references.json.gz")); err != nil {
+		t.Fatalf("remove gz: %v", err)
+	}
+
+	ds, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	t.Cleanup(func() { _ = ds.Close() })
+
+	if ds.Size() != n {
+		t.Fatalf("Size() = %d, want %d", ds.Size(), n)
+	}
+	if ds.NumClusters <= 0 {
+		t.Fatalf("NumClusters = %d, want > 0", ds.NumClusters)
+	}
+	if ds.NumClusters != chooseNumClusters(n) {
+		t.Errorf("NumClusters = %d, want %d (matching chooseNumClusters)", ds.NumClusters, chooseNumClusters(n))
+	}
+	if got := len(ds.Centroids); got != ds.NumClusters*VectorDim {
+		t.Errorf("Centroids length = %d, want %d", got, ds.NumClusters*VectorDim)
+	}
+	if got := len(ds.ClusterOffsets); got != ds.NumClusters+1 {
+		t.Fatalf("ClusterOffsets length = %d, want %d", got, ds.NumClusters+1)
+	}
+	if ds.ClusterOffsets[0] != 0 {
+		t.Errorf("ClusterOffsets[0] = %d, want 0", ds.ClusterOffsets[0])
+	}
+	if int(ds.ClusterOffsets[ds.NumClusters]) != n {
+		t.Errorf("ClusterOffsets[last] = %d, want %d", ds.ClusterOffsets[ds.NumClusters], n)
+	}
+	for c := 0; c < ds.NumClusters; c++ {
+		if ds.ClusterOffsets[c] > ds.ClusterOffsets[c+1] {
+			t.Fatalf("offsets not monotonic at cluster %d: %d > %d", c, ds.ClusterOffsets[c], ds.ClusterOffsets[c+1])
+		}
+	}
+
+	// Frauds: roughly half the records were tagged fraud. Reordering must
+	// preserve the count, even if the index order changes.
+	frauds := 0
+	for i := 0; i < n; i++ {
+		if ds.IsFraud(i) {
+			frauds++
+		}
+	}
+	if frauds != n/2 {
+		t.Errorf("fraud count after IVF reorder = %d, want %d", frauds, n/2)
 	}
 }
 
