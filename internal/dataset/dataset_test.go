@@ -164,6 +164,49 @@ func TestLoad_BinaryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLoad_BinaryRoundTrip16(t *testing.T) {
+	dir := writeFixtureDir(t, `[
+      {"vector":[0,0,0,0,0,0,0,0,0,0,0,0,0,0],"label":"legit"},
+      {"vector":[1,1,1,1,1,1,1,1,1,1,1,1,1,1],"label":"fraud"}
+    ]`)
+	if err := CompileFromJSONGzWithOptions(
+		filepath.Join(dir, "references.json.gz"),
+		filepath.Join(dir, "references.bin"),
+		CompileOptions{Precision: Precision16},
+	); err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "references.json.gz")); err != nil {
+		t.Fatalf("remove gz: %v", err)
+	}
+
+	ds, err := Load(dir)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	t.Cleanup(func() { _ = ds.Close() })
+	if ds.Precision != Precision16 {
+		t.Fatalf("Precision = %d, want %d", ds.Precision, Precision16)
+	}
+	if len(ds.Vectors16) != 2*VectorDim {
+		t.Fatalf("Vectors16 length = %d, want %d", len(ds.Vectors16), 2*VectorDim)
+	}
+	if ds.Vectors != nil {
+		t.Fatalf("Vectors should be nil for precision-16 blob")
+	}
+	if ds.IsFraud(0) || !ds.IsFraud(1) {
+		t.Errorf("IsFraud wrong after round-trip: 0=%v 1=%v", ds.IsFraud(0), ds.IsFraud(1))
+	}
+	for i := 0; i < VectorDim; i++ {
+		if ds.Vectors16[i] != Quantize16(0) {
+			t.Errorf("vec0[%d] = %v, want %v", i, ds.Vectors16[i], Quantize16(0))
+		}
+		if ds.Vectors16[VectorDim+i] != Quantize16(1) {
+			t.Errorf("vec1[%d] = %v, want %v", i, ds.Vectors16[VectorDim+i], Quantize16(1))
+		}
+	}
+}
+
 func TestQuantize(t *testing.T) {
 	cases := []struct {
 		in   float32
@@ -178,6 +221,24 @@ func TestQuantize(t *testing.T) {
 	for _, c := range cases {
 		if got := Quantize(c.in); got != c.want {
 			t.Errorf("Quantize(%v) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+func TestQuantize16(t *testing.T) {
+	cases := []struct {
+		in   float32
+		want uint16
+	}{
+		{-2, 0},
+		{-1, 0},
+		{0, 32768},
+		{1, 65535},
+		{2, 65535},
+	}
+	for _, c := range cases {
+		if got := Quantize16(c.in); got != c.want {
+			t.Errorf("Quantize16(%v) = %d, want %d", c.in, got, c.want)
 		}
 	}
 }

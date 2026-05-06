@@ -12,11 +12,16 @@ import (
 )
 
 type Handler struct {
-	ds *dataset.Dataset
+	ds   *dataset.Dataset
+	opts search.Options
 }
 
 func New(ds *dataset.Dataset) *Handler {
-	return &Handler{ds: ds}
+	return NewWithOptions(ds, search.DefaultOptions)
+}
+
+func NewWithOptions(ds *dataset.Dataset, opts search.Options) *Handler {
+	return &Handler{ds: ds, opts: opts}
 }
 
 var (
@@ -45,13 +50,19 @@ func (h *Handler) FraudScore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	q := vector.Vectorize(p, h.ds)
-	score := search.FraudScore(h.ds, q)
+	var score float64
+	if h.ds.Precision == dataset.Precision16 {
+		q := vector.Vectorize16(p, h.ds)
+		score = search.FraudScore16WithOptions(h.ds, q, h.opts)
+	} else {
+		q := vector.Vectorize(p, h.ds)
+		score = search.FraudScoreWithOptions(h.ds, q, h.opts)
+	}
 
 	bp := bufPool.Get().(*[]byte)
 	buf := (*bp)[:0]
 	buf = append(buf, `{"approved":`...)
-	if score < 0.4 {
+	if score < 0.5 {
 		buf = append(buf, "true"...)
 	} else {
 		buf = append(buf, "false"...)

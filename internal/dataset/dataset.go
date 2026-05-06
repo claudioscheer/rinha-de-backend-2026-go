@@ -11,16 +11,22 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"unsafe"
 )
 
 const VectorDim = 14
+const (
+	Precision8  = 8
+	Precision16 = 16
+)
 
 // binaryMagic identifies the pre-compiled references.bin format produced by
 // cmd/compile-dataset. Bumping this invalidates older blobs.
 const binaryMagic uint32 = 0x52313237 // "R127"
 
 // binaryHeaderSize is the on-disk header preceding the index + vector + fraud
-// blocks: magic, count, num_clusters, reserved (each 4 bytes).
+// blocks: magic, count, num_clusters, precision (each 4 bytes). Older blobs
+// wrote zero in the precision slot, which is treated as Precision8.
 const binaryHeaderSize = 16
 
 type Normalization struct {
@@ -35,11 +41,11 @@ type Normalization struct {
 
 // Dataset is the in-memory reference base used by the K-NN search.
 //
-// Vectors are quantized to uint8 (linear map [-1, 1] → [0, 255]) to cut memory
-// 4× versus float32. Frauds is a packed bitmap (1 bit per record). The bulk
-// of the data is kept in Vectors, which can be mmap-backed when loaded from a
-// pre-compiled blob — that lets two API replicas share the same physical
-// pages via the kernel's page cache.
+// Vectors are quantized to either uint8 or uint16 to cut memory versus float32.
+// Frauds is a packed bitmap (1 bit per record). The bulk of the data is kept
+// in Vectors/Vectors16, which can be mmap-backed when loaded from a
+// pre-compiled blob — that lets two API replicas share the same physical pages
+// via the kernel's page cache.
 //
 // When NumClusters > 0, the dataset carries an inverted-file (IVF) index:
 // vectors are sorted by cluster id, ClusterOffsets[c..c+1] gives the slice of
@@ -51,21 +57,27 @@ type Dataset struct {
 
 	// Vectors stores quantized vectors flattened: index i lives at
 	// Vectors[i*VectorDim : (i+1)*VectorDim]. With an IVF index, vectors
-	// are stored in cluster-id order.
+	// are stored in cluster-id order. Used when Precision == Precision8.
 	Vectors []uint8
+	// Vectors16 is the uint16 variant used by high-recall compiled blobs.
+	Vectors16 []uint16
 	// Frauds is a packed bitmap. Bit i is 1 when record i is fraud. The
-	// ordering matches Vectors.
+	// ordering matches Vectors/Vectors16.
 	Frauds []uint8
 
 	// Centroids holds quantized cluster centroids:
-	// Centroids[c*VectorDim : (c+1)*VectorDim]. Nil when NumClusters == 0.
+	// Centroids[c*VectorDim : (c+1)*VectorDim]. Nil when NumClusters == 0 or
+	// Precision == Precision16.
 	Centroids []uint8
+	// Centroids16 is the uint16 variant used when Precision == Precision16.
+	Centroids16 []uint16
 	// ClusterOffsets has length NumClusters+1. Records of cluster c live
 	// at indices [ClusterOffsets[c], ClusterOffsets[c+1]). Heap-allocated
 	// so the hot path doesn't decode uint32s out of the mmap on every
 	// query.
 	ClusterOffsets []uint32
 	NumClusters    int
+	Precision      int
 
 	count int
 
@@ -84,6 +96,14 @@ func (d *Dataset) IsFraud(i int) bool {
 // Vector returns the i-th reference vector as a slice into the underlying
 // storage. The result aliases the dataset and must not be modified.
 func (d *Dataset) Vector(i int) []uint8 {
+	if d.Vectors == nil && d.Vectors16 != nil {
+		out := make([]uint8, VectorDim)
+		row := d.Vectors16[i*VectorDim : (i+1)*VectorDim]
+		for j, v := range row {
+			out[j] = uint8((uint32(v) + 128) / 257)
+		}
+		return out
+	}
 	return d.Vectors[i*VectorDim : (i+1)*VectorDim]
 }
 
@@ -93,9 +113,20 @@ func (d *Dataset) Vector(i int) []uint8 {
 // force.
 func NewForTest(vectors, frauds []uint8, count int) *Dataset {
 	return &Dataset{
-		Vectors: vectors,
-		Frauds:  frauds,
-		count:   count,
+		Vectors:   vectors,
+		Frauds:    frauds,
+		Precision: Precision8,
+		count:     count,
+	}
+}
+
+// NewForTest16 constructs a heap-only Precision16 Dataset for tests.
+func NewForTest16(vectors []uint16, frauds []uint8, count int) *Dataset {
+	return &Dataset{
+		Vectors16: vectors,
+		Frauds:    frauds,
+		Precision: Precision16,
+		count:     count,
 	}
 }
 
@@ -109,6 +140,20 @@ func NewForTestIVF(vectors, frauds, centroids []uint8, offsets []uint32, count, 
 		Centroids:      centroids,
 		ClusterOffsets: offsets,
 		NumClusters:    numClusters,
+		Precision:      Precision8,
+		count:          count,
+	}
+}
+
+// NewForTestIVF16 constructs a heap-only Precision16 Dataset with an IVF index.
+func NewForTestIVF16(vectors []uint16, frauds []uint8, centroids []uint16, offsets []uint32, count, numClusters int) *Dataset {
+	return &Dataset{
+		Vectors16:      vectors,
+		Frauds:         frauds,
+		Centroids16:    centroids,
+		ClusterOffsets: offsets,
+		NumClusters:    numClusters,
+		Precision:      Precision16,
 		count:          count,
 	}
 }
@@ -119,7 +164,10 @@ func (d *Dataset) Close() error {
 		err := syscall.Munmap(d.mmap)
 		d.mmap = nil
 		d.Vectors = nil
+		d.Vectors16 = nil
 		d.Frauds = nil
+		d.Centroids = nil
+		d.Centroids16 = nil
 		return err
 	}
 	return nil
@@ -135,6 +183,16 @@ func Quantize(v float32) uint8 {
 		v = 1
 	}
 	return uint8((v+1)*127.5 + 0.5)
+}
+
+// Quantize16 maps a float in [-1, 1] to uint16 in [0, 65535].
+func Quantize16(v float32) uint16 {
+	if v < -1 {
+		v = -1
+	} else if v > 1 {
+		v = 1
+	}
+	return uint16((v+1)*32767.5 + 0.5)
 }
 
 func Load(dir string) (*Dataset, error) {
@@ -164,11 +222,12 @@ func Load(dir string) (*Dataset, error) {
 		return nil, err
 	}
 	return &Dataset{
-		Norm:    norm,
-		MccRisk: mccRisk,
-		Vectors: vectors,
-		Frauds:  frauds,
-		count:   count,
+		Norm:      norm,
+		MccRisk:   mccRisk,
+		Vectors:   vectors,
+		Frauds:    frauds,
+		Precision: Precision8,
+		count:     count,
 	}, nil
 }
 
@@ -243,7 +302,7 @@ func (g gzipReadCloser) Close() error {
 //	if nc > 0:
 //	  centroids[nc*VectorDim]                             quantized centroids
 //	  cluster_offsets[(nc+1)*4]                           uint32 LE prefix sums
-//	vectors[count*VectorDim]                              uint8 vectors (cluster-sorted when nc>0)
+//	vectors[count*VectorDim*bytes_per_component]          quantized vectors (cluster-sorted when nc>0)
 //	frauds[(count+7)/8]                                   packed fraud bitmap
 func loadBinary(path string) (*Dataset, error) {
 	f, err := os.Open(path)
@@ -273,17 +332,30 @@ func loadBinary(path string) (*Dataset, error) {
 	}
 	count := int(binary.LittleEndian.Uint32(buf[4:8]))
 	nc := int(binary.LittleEndian.Uint32(buf[8:12]))
+	precision := int(binary.LittleEndian.Uint32(buf[12:16]))
+	if precision == 0 {
+		precision = Precision8
+	}
+	if precision != Precision8 && precision != Precision16 {
+		_ = syscall.Munmap(buf)
+		return nil, fmt.Errorf("unsupported vector precision %d", precision)
+	}
 
 	pos := binaryHeaderSize
 	var centroids []uint8
+	var centroids16 []uint16
 	var offsets []uint32
 	if nc > 0 {
-		centBytes := nc * VectorDim
+		centBytes := nc * VectorDim * bytesPerComponent(precision)
 		if pos+centBytes > size {
 			_ = syscall.Munmap(buf)
 			return nil, fmt.Errorf("truncated centroids: %d bytes available, %d needed", size-pos, centBytes)
 		}
-		centroids = buf[pos : pos+centBytes]
+		if precision == Precision16 {
+			centroids16 = uint16Slice(buf[pos : pos+centBytes])
+		} else {
+			centroids = buf[pos : pos+centBytes]
+		}
 		pos += centBytes
 
 		offsetsBytes := (nc + 1) * 4
@@ -302,12 +374,18 @@ func loadBinary(path string) (*Dataset, error) {
 		pos += offsetsBytes
 	}
 
-	vecBytes := count * VectorDim
+	vecBytes := count * VectorDim * bytesPerComponent(precision)
 	if pos+vecBytes > size {
 		_ = syscall.Munmap(buf)
 		return nil, fmt.Errorf("truncated vectors: %d bytes available, %d needed", size-pos, vecBytes)
 	}
-	vectors := buf[pos : pos+vecBytes]
+	var vectors []uint8
+	var vectors16 []uint16
+	if precision == Precision16 {
+		vectors16 = uint16Slice(buf[pos : pos+vecBytes])
+	} else {
+		vectors = buf[pos : pos+vecBytes]
+	}
 	pos += vecBytes
 
 	fb := fraudBytes(count)
@@ -319,13 +397,30 @@ func loadBinary(path string) (*Dataset, error) {
 
 	return &Dataset{
 		Vectors:        vectors,
+		Vectors16:      vectors16,
 		Frauds:         frauds,
 		Centroids:      centroids,
+		Centroids16:    centroids16,
 		ClusterOffsets: offsets,
 		NumClusters:    nc,
+		Precision:      precision,
 		count:          count,
 		mmap:           buf,
 	}, nil
+}
+
+func bytesPerComponent(precision int) int {
+	if precision == Precision16 {
+		return 2
+	}
+	return 1
+}
+
+func uint16Slice(buf []byte) []uint16 {
+	if len(buf) == 0 {
+		return nil
+	}
+	return unsafe.Slice((*uint16)(unsafe.Pointer(&buf[0])), len(buf)/2)
 }
 
 // loadJSON streams a gzipped JSON array of `{"vector": [...], "label": "..."}`
@@ -382,6 +477,49 @@ func decodeJSON(r io.Reader) ([]uint8, []uint8, int, error) {
 	return vectors, frauds, count, nil
 }
 
+func decodeJSONBoth(r io.Reader) ([]uint8, []uint16, []uint8, int, error) {
+	dec := json.NewDecoder(bufio.NewReaderSize(r, 1<<20))
+
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, nil, nil, 0, fmt.Errorf("read array start: %w", err)
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '[' {
+		return nil, nil, nil, 0, fmt.Errorf("expected array start, got %v", tok)
+	}
+
+	const estimated = 3_000_000
+	vectors8 := make([]uint8, 0, estimated*VectorDim)
+	vectors16 := make([]uint16, 0, estimated*VectorDim)
+	frauds := make([]uint8, 0, fraudBytes(estimated))
+	count := 0
+
+	var rec referenceRecord
+	for dec.More() {
+		rec.Vector = rec.Vector[:0]
+		rec.Label = ""
+		if err := dec.Decode(&rec); err != nil {
+			return nil, nil, nil, 0, fmt.Errorf("decode record: %w", err)
+		}
+		if len(rec.Vector) != VectorDim {
+			return nil, nil, nil, 0, fmt.Errorf("unexpected vector dim %d", len(rec.Vector))
+		}
+		for _, v := range rec.Vector {
+			vectors8 = append(vectors8, Quantize(v))
+			vectors16 = append(vectors16, Quantize16(v))
+		}
+		if count%8 == 0 {
+			frauds = append(frauds, 0)
+		}
+		if rec.Label == "fraud" {
+			frauds[count>>3] |= 1 << uint(count&7)
+		}
+		count++
+	}
+
+	return vectors8, vectors16, frauds, count, nil
+}
+
 type referenceRecord struct {
 	Vector []float32 `json:"vector"`
 	Label  string    `json:"label"`
@@ -415,6 +553,7 @@ func writeBlob(w io.Writer, vectors, frauds, centroids []uint8, offsets []uint32
 	binary.LittleEndian.PutUint32(hdr[0:4], binaryMagic)
 	binary.LittleEndian.PutUint32(hdr[4:8], uint32(count))
 	binary.LittleEndian.PutUint32(hdr[8:12], uint32(numClusters))
+	binary.LittleEndian.PutUint32(hdr[12:16], Precision8)
 	if _, err := bw.Write(hdr[:]); err != nil {
 		return err
 	}
@@ -439,29 +578,135 @@ func writeBlob(w io.Writer, vectors, frauds, centroids []uint8, offsets []uint32
 	return bw.Flush()
 }
 
+func writeBlob16(w io.Writer, vectors, centroids []uint16, frauds []uint8, offsets []uint32, count, numClusters int) error {
+	if len(vectors) != count*VectorDim {
+		return fmt.Errorf("vectors16 length %d, want %d", len(vectors), count*VectorDim)
+	}
+	if len(frauds) != fraudBytes(count) {
+		return fmt.Errorf("frauds length %d, want %d", len(frauds), fraudBytes(count))
+	}
+	if numClusters > 0 {
+		if len(centroids) != numClusters*VectorDim {
+			return fmt.Errorf("centroids16 length %d, want %d", len(centroids), numClusters*VectorDim)
+		}
+		if len(offsets) != numClusters+1 {
+			return fmt.Errorf("offsets length %d, want %d", len(offsets), numClusters+1)
+		}
+		if int(offsets[numClusters]) != count {
+			return fmt.Errorf("offsets[%d]=%d, want count=%d", numClusters, offsets[numClusters], count)
+		}
+	}
+
+	bw := bufio.NewWriterSize(w, 1<<20)
+	var hdr [binaryHeaderSize]byte
+	binary.LittleEndian.PutUint32(hdr[0:4], binaryMagic)
+	binary.LittleEndian.PutUint32(hdr[4:8], uint32(count))
+	binary.LittleEndian.PutUint32(hdr[8:12], uint32(numClusters))
+	binary.LittleEndian.PutUint32(hdr[12:16], Precision16)
+	if _, err := bw.Write(hdr[:]); err != nil {
+		return err
+	}
+	if numClusters > 0 {
+		if err := writeUint16s(bw, centroids); err != nil {
+			return err
+		}
+		var off [4]byte
+		for i := 0; i <= numClusters; i++ {
+			binary.LittleEndian.PutUint32(off[:], offsets[i])
+			if _, err := bw.Write(off[:]); err != nil {
+				return err
+			}
+		}
+	}
+	if err := writeUint16s(bw, vectors); err != nil {
+		return err
+	}
+	if _, err := bw.Write(frauds); err != nil {
+		return err
+	}
+	return bw.Flush()
+}
+
+func writeUint16s(w io.Writer, values []uint16) error {
+	var buf [8192]byte
+	for len(values) > 0 {
+		n := len(values)
+		if n > len(buf)/2 {
+			n = len(buf) / 2
+		}
+		for i := 0; i < n; i++ {
+			binary.LittleEndian.PutUint16(buf[i*2:], values[i])
+		}
+		if _, err := w.Write(buf[:n*2]); err != nil {
+			return err
+		}
+		values = values[n:]
+	}
+	return nil
+}
+
+type CompileOptions struct {
+	Precision int
+	Clusters  int
+}
+
 // CompileFromJSONGz reads a gzipped references file, builds an IVF index
 // (when the dataset is large enough), reorders vectors by cluster id, and
 // writes the compact binary blob the API mmaps at startup. Exported for use
 // by cmd/compile-dataset.
 func CompileFromJSONGz(in, out string) error {
+	return CompileFromJSONGzWithOptions(in, out, CompileOptions{Precision: Precision8})
+}
+
+func CompileFromJSONGzWithOptions(in, out string, opts CompileOptions) error {
+	if opts.Precision == 0 {
+		opts.Precision = Precision8
+	}
+	if opts.Precision != Precision8 && opts.Precision != Precision16 {
+		return fmt.Errorf("unsupported precision %d", opts.Precision)
+	}
+
 	r, err := openGzipped(in)
 	if err != nil {
 		return err
 	}
 	defer r.Close()
 
-	vectors, frauds, count, err := decodeJSON(r)
-	if err != nil {
-		return err
+	var vectors []uint8
+	var vectors16 []uint16
+	var frauds []uint8
+	var count int
+	if opts.Precision == Precision16 {
+		vectors, vectors16, frauds, count, err = decodeJSONBoth(r)
+		if err != nil {
+			return err
+		}
+	} else {
+		vectors, frauds, count, err = decodeJSON(r)
+		if err != nil {
+			return err
+		}
 	}
 
 	numClusters := chooseNumClusters(count)
+	if opts.Clusters > 0 {
+		numClusters = opts.Clusters
+	}
+	if numClusters > count {
+		numClusters = count
+	}
 	var centroids []uint8
+	var centroids16 []uint16
 	var offsets []uint32
 	if numClusters > 0 {
 		var assignments []uint16
 		centroids, assignments = kmeans(vectors, count, numClusters)
-		vectors, frauds, offsets = reorderByCluster(vectors, frauds, count, numClusters, assignments)
+		if opts.Precision == Precision16 {
+			centroids16 = buildCentroids16(vectors16, count, numClusters, assignments)
+			vectors16, frauds, offsets = reorderByCluster16(vectors16, frauds, count, numClusters, assignments)
+		} else {
+			vectors, frauds, offsets = reorderByCluster(vectors, frauds, count, numClusters, assignments)
+		}
 	}
 
 	tmp := out + ".tmp"
@@ -469,7 +714,12 @@ func CompileFromJSONGz(in, out string) error {
 	if err != nil {
 		return err
 	}
-	if err := writeBlob(o, vectors, frauds, centroids, offsets, count, numClusters); err != nil {
+	if opts.Precision == Precision16 {
+		err = writeBlob16(o, vectors16, centroids16, frauds, offsets, count, numClusters)
+	} else {
+		err = writeBlob(o, vectors, frauds, centroids, offsets, count, numClusters)
+	}
+	if err != nil {
 		_ = o.Close()
 		_ = os.Remove(tmp)
 		return err

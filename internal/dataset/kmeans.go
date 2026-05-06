@@ -181,3 +181,57 @@ func reorderByCluster(vectors, frauds []uint8, count, numClusters int, assignmen
 
 	return newVectors, newFrauds, offsets
 }
+
+func buildCentroids16(vectors []uint16, count, numClusters int, assignments []uint16) []uint16 {
+	sums := make([]uint64, numClusters*VectorDim)
+	counts := make([]uint32, numClusters)
+	for i := 0; i < count; i++ {
+		c := int(assignments[i])
+		base := c * VectorDim
+		for d := 0; d < VectorDim; d++ {
+			sums[base+d] += uint64(vectors[i*VectorDim+d])
+		}
+		counts[c]++
+	}
+
+	out := make([]uint16, numClusters*VectorDim)
+	for c := 0; c < numClusters; c++ {
+		if counts[c] == 0 {
+			continue
+		}
+		half := uint64(counts[c] / 2)
+		base := c * VectorDim
+		for d := 0; d < VectorDim; d++ {
+			out[base+d] = uint16((sums[base+d] + half) / uint64(counts[c]))
+		}
+	}
+	return out
+}
+
+func reorderByCluster16(vectors []uint16, frauds []uint8, count, numClusters int, assignments []uint16) ([]uint16, []uint8, []uint32) {
+	offsets := make([]uint32, numClusters+1)
+	for i := 0; i < count; i++ {
+		offsets[assignments[i]+1]++
+	}
+	for c := 0; c < numClusters; c++ {
+		offsets[c+1] += offsets[c]
+	}
+
+	pos := make([]uint32, numClusters)
+	copy(pos, offsets[:numClusters])
+
+	newVectors := make([]uint16, count*VectorDim)
+	newFrauds := make([]uint8, fraudBytes(count))
+
+	for i := 0; i < count; i++ {
+		c := assignments[i]
+		p := int(pos[c])
+		copy(newVectors[p*VectorDim:(p+1)*VectorDim], vectors[i*VectorDim:(i+1)*VectorDim])
+		if frauds[i>>3]&(1<<uint(i&7)) != 0 {
+			newFrauds[p>>3] |= 1 << uint(p&7)
+		}
+		pos[c]++
+	}
+
+	return newVectors, newFrauds, offsets
+}

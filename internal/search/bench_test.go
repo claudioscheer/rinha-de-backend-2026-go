@@ -22,16 +22,26 @@ func BenchmarkFraudScore_Real(b *testing.B) {
 		b.Fatalf("load: %v", err)
 	}
 	b.Cleanup(func() { _ = ds.Close() })
-	b.Logf("dataset: %d records", ds.Size())
+	b.Logf("dataset: %d records precision=%d clusters=%d", ds.Size(), ds.Precision, ds.NumClusters)
 
-	var q [dataset.VectorDim]uint8
-	for i := range q {
-		q[i] = 128
+	var q8 [dataset.VectorDim]uint8
+	for i := range q8 {
+		q8[i] = dataset.Quantize(0)
+	}
+	var q16 [dataset.VectorDim]uint16
+	for i := range q16 {
+		q16[i] = dataset.Quantize16(0)
 	}
 
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		_ = FraudScore(ds, q)
+	if ds.Precision == dataset.Precision16 {
+		for i := 0; i < b.N; i++ {
+			_ = FraudScore16WithOptions(ds, q16, DefaultOptions)
+		}
+	} else {
+		for i := 0; i < b.N; i++ {
+			_ = FraudScore(ds, q8)
+		}
 	}
 }
 

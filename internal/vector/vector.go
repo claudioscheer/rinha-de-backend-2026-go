@@ -52,47 +52,65 @@ func clamp01(v float64) float64 { return min(1, max(0, v)) }
 // Vectorize turns the payload into a 14-dimensional uint8 vector following
 // docs/en/DETECTION_RULES.md.
 func Vectorize(p *Payload, ds *dataset.Dataset) [dataset.VectorDim]uint8 {
-	n := ds.Norm
+	raw := vectorizeFloat(p, ds)
 	var v [dataset.VectorDim]uint8
+	for i, x := range raw {
+		v[i] = dataset.Quantize(x)
+	}
+	return v
+}
 
-	v[0] = dataset.Quantize(float32(clamp01(p.Transaction.Amount / n.MaxAmount)))
-	v[1] = dataset.Quantize(float32(clamp01(float64(p.Transaction.Installments) / n.MaxInstallments)))
+func Vectorize16(p *Payload, ds *dataset.Dataset) [dataset.VectorDim]uint16 {
+	raw := vectorizeFloat(p, ds)
+	var v [dataset.VectorDim]uint16
+	for i, x := range raw {
+		v[i] = dataset.Quantize16(x)
+	}
+	return v
+}
+
+func vectorizeFloat(p *Payload, ds *dataset.Dataset) [dataset.VectorDim]float32 {
+	n := ds.Norm
+	var v [dataset.VectorDim]float32
+
+	v[0] = float32(clamp01(p.Transaction.Amount / n.MaxAmount))
+	v[1] = float32(clamp01(float64(p.Transaction.Installments) / n.MaxInstallments))
 
 	if p.Customer.AvgAmount > 0 {
-		v[2] = dataset.Quantize(float32(clamp01((p.Transaction.Amount / p.Customer.AvgAmount) / n.AmountVsAvgRatio)))
+		v[2] = float32(clamp01((p.Transaction.Amount / p.Customer.AvgAmount) / n.AmountVsAvgRatio))
 	} else {
-		v[2] = dataset.Quantize(1)
+		v[2] = 1
 	}
 
 	t := p.Transaction.RequestedAt.UTC()
-	v[3] = dataset.Quantize(float32(float64(t.Hour()) / 23.0))
+	v[3] = float32(float64(t.Hour()) / 23.0)
 	// Go: Sunday=0..Saturday=6. Spec: Mon=0..Sun=6.
-	v[4] = dataset.Quantize(float32(float64((int(t.Weekday())+6)%7) / 6.0))
+	v[4] = float32(float64((int(t.Weekday())+6)%7) / 6.0)
 
 	if p.LastTransaction != nil {
 		minutes := p.Transaction.RequestedAt.Sub(p.LastTransaction.Timestamp).Minutes()
 		if minutes < 0 {
 			minutes = 0
 		}
-		v[5] = dataset.Quantize(float32(clamp01(minutes / n.MaxMinutes)))
-		v[6] = dataset.Quantize(float32(clamp01(p.LastTransaction.KmFromCurrent / n.MaxKm)))
+		v[5] = float32(clamp01(minutes / n.MaxMinutes))
+		v[6] = float32(clamp01(p.LastTransaction.KmFromCurrent / n.MaxKm))
 	} else {
-		v[5] = dataset.Quantize(-1)
-		v[6] = dataset.Quantize(-1)
+		v[5] = -1
+		v[6] = -1
 	}
 
-	v[7] = dataset.Quantize(float32(clamp01(p.Terminal.KmFromHome / n.MaxKm)))
-	v[8] = dataset.Quantize(float32(clamp01(float64(p.Customer.TxCount24h) / n.MaxTxCount24h)))
+	v[7] = float32(clamp01(p.Terminal.KmFromHome / n.MaxKm))
+	v[8] = float32(clamp01(float64(p.Customer.TxCount24h) / n.MaxTxCount24h))
 
 	if p.Terminal.IsOnline {
-		v[9] = dataset.Quantize(1)
+		v[9] = 1
 	} else {
-		v[9] = dataset.Quantize(0)
+		v[9] = 0
 	}
 	if p.Terminal.CardPresent {
-		v[10] = dataset.Quantize(1)
+		v[10] = 1
 	} else {
-		v[10] = dataset.Quantize(0)
+		v[10] = 0
 	}
 
 	known := false
@@ -103,18 +121,18 @@ func Vectorize(p *Payload, ds *dataset.Dataset) [dataset.VectorDim]uint8 {
 		}
 	}
 	if known {
-		v[11] = dataset.Quantize(0)
+		v[11] = 0
 	} else {
-		v[11] = dataset.Quantize(1)
+		v[11] = 1
 	}
 
 	if r, ok := ds.MccRisk[p.Merchant.MCC]; ok {
-		v[12] = dataset.Quantize(r)
+		v[12] = r
 	} else {
-		v[12] = dataset.Quantize(0.5)
+		v[12] = 0.5
 	}
 
-	v[13] = dataset.Quantize(float32(clamp01(p.Merchant.AvgAmount / n.MaxMerchantAvgAmount)))
+	v[13] = float32(clamp01(p.Merchant.AvgAmount / n.MaxMerchantAvgAmount))
 
 	return v
 }

@@ -4,9 +4,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 
 	"github.com/claudioscheer/rinha-de-backend-2026-go/internal/dataset"
 	"github.com/claudioscheer/rinha-de-backend-2026-go/internal/handler"
+	"github.com/claudioscheer/rinha-de-backend-2026-go/internal/search"
 )
 
 func main() {
@@ -21,7 +23,9 @@ func main() {
 	log.Printf("loaded %d reference vectors", ds.Size())
 
 	mux := http.NewServeMux()
-	h := handler.New(ds)
+	opts := searchOptionsFromEnv()
+	log.Printf("search options: nprobe=%d max_nprobe=%d adaptive=%v", opts.Nprobe, opts.MaxNprobe, opts.Adaptive)
+	h := handler.NewWithOptions(ds, opts)
 	mux.HandleFunc("GET /ready", h.Ready)
 	mux.HandleFunc("POST /fraud-score", h.FraudScore)
 
@@ -41,4 +45,24 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func searchOptionsFromEnv() search.Options {
+	opts := search.DefaultOptions
+	if v := os.Getenv("SEARCH_NPROBE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			opts.Nprobe = n
+		}
+	}
+	if v := os.Getenv("SEARCH_MAX_NPROBE"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			opts.MaxNprobe = n
+		}
+	}
+	if v := os.Getenv("SEARCH_ADAPTIVE"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			opts.Adaptive = b
+		}
+	}
+	return opts
 }

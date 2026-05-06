@@ -162,8 +162,8 @@ func TestEndToEnd_HighRiskDenied(t *testing.T) {
 	}
 }
 
-// Threshold boundary: 0.4 must be the *exclusive* upper bound for approval.
-// 2 frauds out of 5 → 0.4 → approved=false.
+// Threshold boundary: with K=5 majority vote, 2 frauds out of 5 → score 0.4 →
+// approved=true (minority of neighbors are fraud).
 func TestEndToEnd_ThresholdExact(t *testing.T) {
 	dir := writeFixture(t, `[
       {"vector":[0,0,0,0,0,0,0,0,0,0,0,0,0,0],"label":"fraud"},
@@ -205,7 +205,7 @@ func TestEndToEnd_ThresholdExact(t *testing.T) {
 	if out.FraudScore != 0.4 {
 		t.Fatalf("score = %v, want 0.4", out.FraudScore)
 	}
-	if out.Approved {
-		t.Errorf("approved = true at score 0.4, but threshold is exclusive (< 0.4)")
+	if !out.Approved {
+		t.Errorf("approved = false at score 0.4, but majority-vote threshold is < 0.5")
 	}
 }

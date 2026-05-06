@@ -74,6 +74,23 @@ func TestFraudScore_Mixed(t *testing.T) {
 	}
 }
 
+func TestFraudScore16_Mixed(t *testing.T) {
+	vecs := make([]uint16, 5*dataset.VectorDim)
+	frauds := make([]uint8, 1)
+	for i := 0; i < 3; i++ {
+		frauds[0] |= 1 << uint(i)
+	}
+	ds := dataset.NewForTest16(vecs, frauds, 5)
+	var q [dataset.VectorDim]uint16
+	for i := range q {
+		q[i] = dataset.Quantize16(0)
+	}
+	got := FraudScore16WithOptions(ds, q, Options{})
+	if got != 0.6 {
+		t.Fatalf("got %v want 0.6", got)
+	}
+}
+
 // With more than K neighbors, only the K nearest contribute. Fraud points
 // near origin must be picked over far legit points.
 func TestFraudScore_PicksNearest(t *testing.T) {
@@ -180,5 +197,56 @@ func TestFraudScore_IVF_NprobeOverflow(t *testing.T) {
 	var q [dataset.VectorDim]uint8
 	if got := FraudScore(ds, q); got != 1.0 {
 		t.Fatalf("got %v, want 1.0", got)
+	}
+}
+
+func TestFraudScore_IVF_AdaptiveExtendsBorderline(t *testing.T) {
+	const clusters = 2
+	vecs := make([]uint8, 8*dataset.VectorDim)
+	frauds := make([]uint8, 1)
+
+	// Cluster 0 is the closest centroid and produces a provisional 2/5
+	// borderline vote, but its records are slightly farther than cluster 1.
+	for i := 0; i < 5; i++ {
+		row := vecs[i*dataset.VectorDim : (i+1)*dataset.VectorDim]
+		for d := range row {
+			row[d] = dataset.Quantize(0.02)
+		}
+	}
+	frauds[0] |= 1 << 0
+	frauds[0] |= 1 << 1
+
+	// Cluster 1 is the second centroid. Its fraud records are closer to the
+	// query and should replace three provisional neighbors when adaptive
+	// probing extends from 1 to 2 clusters.
+	for i := 5; i < 8; i++ {
+		row := vecs[i*dataset.VectorDim : (i+1)*dataset.VectorDim]
+		for d := range row {
+			row[d] = dataset.Quantize(0)
+		}
+		frauds[0] |= 1 << uint(i)
+	}
+
+	centroids := make([]uint8, clusters*dataset.VectorDim)
+	for d := 0; d < dataset.VectorDim; d++ {
+		centroids[d] = dataset.Quantize(0)
+		centroids[dataset.VectorDim+d] = dataset.Quantize(0.10)
+	}
+	offsets := []uint32{0, 5, 8}
+	ds := dataset.NewForTestIVF(vecs, frauds, centroids, offsets, 8, clusters)
+
+	var q [dataset.VectorDim]uint8
+	for d := range q {
+		q[d] = dataset.Quantize(0)
+	}
+
+	fixed := FraudScoreWithOptions(ds, q, Options{Nprobe: 1})
+	if fixed != 0.4 {
+		t.Fatalf("fixed score = %v, want 0.4", fixed)
+	}
+
+	adaptive := FraudScoreWithOptions(ds, q, Options{Nprobe: 1, MaxNprobe: 2, Adaptive: true})
+	if adaptive != 0.6 {
+		t.Fatalf("adaptive score = %v, want 0.6", adaptive)
 	}
 }

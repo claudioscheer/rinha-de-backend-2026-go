@@ -14,8 +14,11 @@ the README). Keep it that way.
 A Go HTTP service that scores transactions for fraud using K-NN over a fixed
 reference dataset of 3 M labeled vectors (14 dimensions each). Search is
 **approximate**: an IVF (inverted-file) index built at container-build time
-partitions the references into 1 024 clusters; queries rank centroids and
-scan only the nearest `Nprobe` buckets (default 8 → ~0.8 % of the dataset).
+partitions the references into 1 024 clusters; queries rank centroids and scan
+the nearest `Nprobe` buckets (production default 12) and adaptively expand to
+24 buckets on 2-vs-3 provisional votes. Wider adaptive ceilings and 16-bit
+blobs exist as tuning hooks, but are not enabled by default because they cost
+too much p99 in the preview load test.
 Brute-force K-NN is preserved as the fallback when no IVF index is present
 (used by unit tests). Two API replicas + nginx load balancer, all under
 tight CPU/memory caps set by the contest.
@@ -46,15 +49,17 @@ behavior:
   `references.json.gz` into the compact `references.bin` blob the API mmaps.
   Runs k-means clustering, reorders vectors by cluster id, and writes the
   IVF index inline.
+- `cmd/evaluate/main.go` — offline evaluator for labeled payload files. Use it
+  to sweep IVF probe counts/thresholds before spending full k6 runs.
 - `internal/dataset/` — quantized reference store. Owns the on-disk binary
-  format (uint8 vectors + IVF centroids + cluster offsets + packed fraud
+  format (uint8/uint16 vectors + IVF centroids + cluster offsets + packed fraud
   bitmap) and the mmap loader. Has a JSON fallback path used only by tests.
   `kmeans.go` holds the build-time k-means + bucket-sort.
-- `internal/vector/` — payload struct + `Vectorize` (turns a request into a
-  `[14]uint8` query vector). Pool-friendly via `Payload.Reset`.
-- `internal/search/` — IVF K-NN with int32 squared distances and
-  bounds-check-elided inner loop. Falls back to brute force when the
-  dataset has no centroids (`NumClusters == 0`).
+- `internal/vector/` — payload struct + `Vectorize`/`Vectorize16` (turns a
+  request into a quantized query vector). Pool-friendly via `Payload.Reset`.
+- `internal/search/` — IVF K-NN with integer squared distances,
+  bounds-check-elided inner loops, and adaptive probing. Falls back to brute
+  force when the dataset has no centroids (`NumClusters == 0`).
 - `internal/handler/` — HTTP handlers, request decoding, manual JSON
   response writing.
 - `resources/` — fixed input data shipped to the container. The
@@ -86,7 +91,7 @@ These come from the contest config (`config.json`, `docker-compose.yml`):
   built `resources/references.bin` (skip otherwise). Run with
   `go test -bench=. -run=^$ -cpu=1 ./internal/search/` after compiling the
   blob with `go run ./cmd/compile-dataset -in resources/references.json.gz
-  -out resources/references.bin`.
+  -out resources/references.bin -precision 8 -clusters 1024`.
 - **No new dependencies** unless necessary. Standard library only is the
   current state and has been enough.
 - **Commits use `claudioscheer <claudioscheer@protonmail.com>` for both
@@ -113,8 +118,8 @@ These come from the contest config (`config.json`, `docker-compose.yml`):
 
 ## Performance characteristics (for context, not contracts)
 
-Measured locally with `BenchmarkFraudScore_Real` against the real 3 M
-dataset on a 2.8 GHz Xeon, GOMAXPROCS=1, `Nprobe=8`:
+Historical baseline measured locally with `BenchmarkFraudScore_Real` against
+the real 3 M dataset on a 2.8 GHz Xeon, GOMAXPROCS=1, `Nprobe=8`:
 
 - ~285 µs / `FraudScore` call (~119× faster than the previous brute-force
   implementation).
@@ -123,15 +128,16 @@ dataset on a 2.8 GHz Xeon, GOMAXPROCS=1, `Nprobe=8`:
   reference vectors).
 
 Compile cost: `cmd/compile-dataset` runs Lloyd's k-means with 15 iterations
-across `runtime.GOMAXPROCS` workers. Roughly 5 minutes for the production
-3 M / 1 024-cluster build on a 4-core host. This is build-time only; runtime
-is unaffected.
+across `runtime.GOMAXPROCS` workers. The production build currently uses
+3 M / 1 024 clusters / 8-bit vectors. This is build-time only; runtime is
+unaffected.
 
 Tuning knobs:
 
-- `internal/search.Nprobe` — number of clusters scanned per query. Higher
-  raises recall and latency. The current 8 was chosen as a starting point;
-  retune empirically against the contest test if detection score regresses.
-- `internal/dataset.chooseNumClusters` — picks 1 024 clusters for the
-  production dataset, 64 for medium fixtures, and 0 (= flat layout, brute
-  force) for tiny tests.
+- `SEARCH_NPROBE`, `SEARCH_MAX_NPROBE`, `SEARCH_ADAPTIVE` — runtime probe
+  controls consumed by `cmd/api`. Higher probe counts raise recall and
+  latency. Current production default is `12/24/true`.
+- `cmd/compile-dataset -clusters` — production Docker build uses 1 024
+  clusters; small fixtures still use `chooseNumClusters`.
+- `cmd/compile-dataset -precision` — production currently uses 8; 16 is
+  available for experiments but measured worse on the preview data.

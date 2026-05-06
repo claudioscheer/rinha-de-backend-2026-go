@@ -15,7 +15,9 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 COPY resources /src/resources
 RUN /out/compile-dataset \
         -in /src/resources/references.json.gz \
-        -out /src/resources/references.bin && \
+        -out /src/resources/references.bin \
+        -precision 8 \
+        -clusters 1024 && \
     rm /src/resources/references.json.gz
 
 FROM alpine:3.20
@@ -29,5 +31,8 @@ ENV RESOURCES_DIR=/app/resources \
     LISTEN_ADDR=:9999 \
     GOGC=50 \
     GOMEMLIMIT=120MiB \
-    GOMAXPROCS=1
+    GOMAXPROCS=1 \
+    SEARCH_NPROBE=12 \
+    SEARCH_MAX_NPROBE=24 \
+    SEARCH_ADAPTIVE=true
 ENTRYPOINT ["/app/api"]

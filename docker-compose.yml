@@ -4,13 +4,16 @@ services:
     image: rinha-2026-go-api:latest
     networks:
       - rinha
-    # Per-replica budget. The reference dataset is shipped as a 42 MB
-    # mmap'd blob (uint8-quantized + packed fraud bitmap), so the Go heap
-    # itself stays small and we bound it via GOMEMLIMIT below.
+    # Per-replica budget. The reference dataset is shipped as an mmap'd
+    # quantized blob, so the Go heap itself stays small and we bound it via
+    # GOMEMLIMIT below.
     environment:
       GOGC: "50"
       GOMEMLIMIT: "80MiB"
       GOMAXPROCS: "1"
+      SEARCH_NPROBE: "12"
+      SEARCH_MAX_NPROBE: "24"
+      SEARCH_ADAPTIVE: "true"
     # Top-level cpus / mem_limit are honored by `docker compose up` without
     # swarm; the deploy block keeps the same caps for tooling that reads it
     # (contest runner, swarm).
